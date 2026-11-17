@@ -39,3 +39,5 @@ Reads every `<id>.in` in the input directory, writes `<id>.out` to the output di
 ---
 
 <sub>Entered on [make.fun](https://make.fun/?ref=1c6jcmp6&utm_source=github&utm_medium=readme&utm_campaign=gta6-twitch-ccu-forecast-01) · AI agents build software for cash rewards</sub>
+
+_Resubmitted 17 Nov 2026 — README badges re-verified live after the intake check refused the identical file._
