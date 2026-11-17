@@ -10,10 +10,11 @@ A forecaster for Grand Theft Auto VI's launch-day Twitch viewers, hour by hour (
 
 One program, no model calls, no network — everything is computed from the case file at run time:
 
-- **Anchor.** Hour 1 of a rolling-midnight launch is a depressed anchor: pre-release hype streams wind down at midnight while the US is still asleep. So the scale anchor is mostly the pre-midnight level: `anchor = p1^0.15 · pre^0.85`, where `p1` is the hour-1 print and `pre` is the geometric mean of the hourly viewers at 21:00/22:00/23:00 UTC the day before release.
-- **Curve.** For each hour 2–24, the median of `log(viewers(h) / anchor)` over past big launches in the case's `comparables` that are console-only (no PC in `platforms` — GTA VI is console-only, as are the practice launches). That median curve captures the launch-day shape: a dip to ~0.7× in the small hours, a jump at the US unlocks from hour 5, an evening peak ~2× the anchor.
-- **Spread.** Lognormal quantiles around the median with `σ_h = 0.12 · √(h−1)` at the 5/25/50/75/95% levels.
-- **Fallbacks** keep the output valid when data is thin: fewer than 6 console-only ratios for an hour → all comparables; still none → persistence (ratio 1); missing pre-midnight history → anchor is the hour-1 print alone.
+- **Anchor.** Hour 1 of a rolling-midnight launch is a depressed anchor: pre-release hype streams wind down at midnight while the US is still asleep. The scale anchor is therefore the pre-midnight level alone — the geometric mean of the hourly viewers at 21:00/22:00/23:00 UTC the day before release. Mixing in the hour-1 print only made the practice score worse (anchor weight on hour 1: 0.15 → 0.183, 0.05 → 0.177, 0.00 → 0.175), so the hour-1 print is not used at all.
+- **Curve.** For each hour 2–24, the scale-weighted median of `log(viewers(h) / anchor)` over past big launches in the case's `comparables` that are console-only (no PC in `platforms` — GTA VI is console-only, as are the practice launches) and whose unlock note carries "Tier: comparable" (early-access-contaminated launches are left out: their release-day shape is distorted by early access). Each comparable is weighted by a Gaussian kernel on the log-distance between its anchor and the target's anchor (bandwidth 1.0), so similarly-sized launches shape the curve most. That curve captures the launch-day shape: a dip to ~0.7× in the small hours, a jump at the US unlocks from hour 5, an evening peak ~2× the anchor.
+- **Spread.** Lognormal quantiles around the median with `σ_h = 0.11 · √(h−1)` at the 5/25/50/75/95% levels.
+- **Fallbacks** keep the output valid when data is thin: clean console-only ratios → console-only (any tier) → all comparables of tier comparable, each step only when the previous pool has fewer than 6 ratios for that hour; still none → persistence (ratio 1); missing pre-midnight history → anchor is the hour-1 print alone.
+- **Deliberately not done.** The practice leaderboard is topped by entries that embed/memorize the practice answers with a ~0 spread (practice loss 0.000001). That scores nothing on the final — the prize is decided by the one real GTA VI case, where a memorized curve with a near-zero spread scores its full log error — so no practice answers are embedded here and the spread stays honest. The parameters sit in a flat optimum (kernel bandwidth 0.8–1.3, anchor weight 0–0.05, spread 0.09–0.11 all within ~0.002), so the model is not tuned to a sharp point of the practice set.
 
 ## Local verification
 
@@ -22,9 +23,10 @@ Ground truth for the 4 practice cases = SullyGnome "Average viewers" for each pr
 | | p00 Wolverine | p01 RDR2 | p02 GoW Ragnarök | p03 Spider-Man 2 | mean |
 |---|---|---|---|---|---|
 | house baseline | 0.744 | 0.287 | 0.215 | 0.303 | **0.387** |
-| this entry | 0.222 | 0.145 | 0.180 | 0.184 | **0.183** |
+| this entry (v1) | 0.222 | 0.145 | 0.180 | 0.184 | **0.183** |
+| this entry (v2, scale-weighted) | 0.198 | 0.147 | 0.128 | 0.151 | **0.156** |
 
-Also verified locally: exactly 23 rows (hours 2–24), quantiles non-decreasing, all > 0 and ≤ 1e9, output well under 65,536 bytes, two runs byte-identical, runtime ~1 s per case (limit 8 s).
+The v2 improvement was checked against a simulated final-size pool (the 4 practice launches added as comparables, 42 total): v2 scores 0.161 there vs 0.187 for v1, winning on 3 of 4 cases in both pools. Also verified locally: exactly 23 rows (hours 2–24), quantiles non-decreasing, all > 0 and ≤ 1e9, output well under 65,536 bytes, two runs byte-identical, runtime ~0.07 s per case (limit 8 s), and 5 synthetic edge cases (no pre-midnight history, all-PC comparables, no comparables, no hour-1 print, no history) all produce valid output.
 
 ## Run it
 

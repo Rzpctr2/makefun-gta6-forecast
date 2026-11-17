@@ -1,35 +1,58 @@
-"""gta6-twitch-ccu-forecast-01 entry: console-launch ratio curve with a
-pre-midnight anchor (Python 3.13, standard library only).
+"""gta6-twitch-ccu-forecast-01 entry: scale-weighted console-launch ratio
+curve with a pre-midnight anchor (Python 3.13, standard library only).
 
 Method (chosen from local tests on the 4 practice cases; see README):
-  - For each hour h = 2..24, take every past big launch in the case's
-    `comparables` that is console-only (its `platforms` has no PC — the
-    final game, GTA VI, is console-only, as are the practice launches),
-    and compute log(viewers(h) / anchor) on its release day, where
-      anchor = p1^0.15 * pre^0.85,
-    p1 is that launch's hour-1 print and pre is the geometric mean of its
-    hourly viewers at 21:00/22:00/23:00 UTC the day before release.
-  - The forecast median for hour h is the target's anchor times the
-    MEDIAN of those log-ratios. The target's anchor is built the same way
-    from its own hour-1 print and its pre-midnight hourly history.
+  - Anchor: the pre-midnight level only -- the geometric mean of the
+    target's hourly viewers at 21:00/22:00/23:00 UTC the day before release.
+    Hour 1 of a rolling-midnight launch is a depressed anchor (pre-release
+    hype streams wind down at midnight while the US is still asleep), and
+    mixing it in only adds noise: on the practice cases the anchor weight
+    on hour 1 falls monotonically the smaller it gets (0.15 -> 0.183,
+    0.05 -> 0.177, 0.00 -> 0.175), so the hour-1 print is not used at all.
+    When the pre-midnight level is missing, the anchor falls back to the
+    hour-1 print alone.
+  - Curve: for each hour h = 2..24, take every past big launch in the
+    case's `comparables` that is console-only (its `platforms` has no PC --
+    the final game, GTA VI, is console-only, as are the practice launches)
+    and whose unlock note carries "Tier: comparable" (early-access-
+    contaminated launches are left out: their release-day shape is
+    distorted by early access), and compute log(viewers(h) / anchor) on
+    its release day. The forecast median for hour h is the target's anchor
+    times the SCALE-WEIGHTED MEDIAN of those log-ratios: each comparable
+    is weighted by a Gaussian kernel on the log-distance between its
+    anchor and the target's anchor (bandwidth 1.0), so launches of a
+    similar size shape the curve most. Launches of a similar scale have
+    similar launch-day shapes; a plain median lets small launches drag
+    the curve. Fallbacks keep the output valid when data is thin:
+    clean console-only -> console-only (any tier) -> all comparables
+    of tier comparable, each step taken only when the previous pool has
+    fewer than 6 ratios for that hour; still none -> persistence
+    (ratio 1).
   - Quantiles are lognormal around that median with
-    sigma_h = 0.12 * sqrt(h - 1), using the standard normal quantiles at
+    sigma_h = 0.11 * sqrt(h - 1), using the standard normal quantiles at
     0.05/0.25/0.5/0.75/0.95.
 
-Why this shape: hour 1 of a rolling-midnight launch is a depressed
-anchor (pre-release hype streams wind down at midnight while the US is
-still asleep), so the pre-midnight level carries most of the scale
-information; the console-only median curve captures the day's shape
-(dip to ~0.7x in the small hours, US unlocks from hour 5, evening peak
-~2x the anchor). Fallbacks keep the output valid when data is thin:
-fewer than 6 console-only ratios for an hour -> all comparables; still
-none -> persistence (ratio 1); missing pre-midnight history -> anchor
-is the hour-1 print alone.
+Why this shape: the pre-midnight level carries most of the scale
+information; the scale-weighted console-only curve captures the day's
+shape (dip to ~0.7x in the small hours, US unlocks from hour 5, evening
+peak ~2x the anchor) for launches of the target's size. The parameters
+sit in a flat optimum (bandwidth 0.8-1.3, anchor weight 0-0.05, spread
+0.09-0.11 all score within ~0.002 of each other), so the model is not
+tuned to a sharp point of the practice set.
+
+Deliberately NOT done: the practice leaderboard is topped by entries
+that embed/memorize the practice answers with a ~0 spread (practice loss
+0.000001). That scores nothing on the final -- the prize is decided by
+the one real GTA VI case, where a memorized curve with a near-zero spread
+scores its full log error -- so no practice answers are embedded here
+and the spread stays honest.
 
 Local practice result (ground truth = SullyGnome "Average viewers" for
 the 4 practice release days, hour-1 values verified equal to the cases'
-`known` prints): mean pinball loss 0.183 vs house baseline 0.387,
-per case p00 0.222 / p01 0.145 / p02 0.180 / p03 0.184.
+`known` prints): mean pinball loss 0.156 vs house baseline 0.387,
+per case p00 0.198 / p01 0.147 / p02 0.128 / p03 0.151. The same
+method on a simulated final-size pool (the 4 practice launches added as
+comparables, 42 total) scores 0.161.
 
 How the grader runs it: `python3 -P -s /bot/main.py` in python:3.13-slim,
 standard library only, no network. It reads every <id>.in in the input
@@ -45,6 +68,7 @@ stand in for /input and /output:
 import json
 import math
 import os
+import re
 import statistics
 from datetime import date, timedelta
 from pathlib import Path
@@ -58,13 +82,16 @@ LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
 # Anchor = p1^A * pre^(1-A): weight on the hour-1 print, the rest on the
 # geometric mean of the pre-midnight hourly viewers (21/22/23 UTC).
-A = 0.15
+# A = 0: the anchor is the pre-midnight level alone (see the docstring).
+A = 0.0
 # Lognormal spread of an hour's forecast: sigma_h = SPREAD * sqrt(h - 1).
-SPREAD = 0.12
+SPREAD = 0.11
 # Pre-midnight hours (UTC, day before release) feeding the anchor.
 PRE_HOURS = ("21", "22", "23")
-# Minimum log-ratios for the console-only curve before falling back.
+# Minimum log-ratios in a pool before falling back to a wider pool.
 MIN_N = 6
+# Gaussian kernel bandwidth (in log-anchor units) for the scale weights.
+SCALE_BW = 1.0
 
 
 def round2(x: float) -> float | int:
@@ -128,8 +155,14 @@ def _anchor(p1: float, pre) -> float:
     return math.exp(A * math.log(p1) + (1.0 - A) * math.log(pre))
 
 
+def _tier(comp: dict) -> str:
+    """The comparable's tier from its unlock note ('Tier: <tier>')."""
+    m = re.search(r"Tier:\s*([a-z\-]+)", comp.get("unlock") or "")
+    return m.group(1) if m else "unknown"
+
+
 def _comparable_curves(case: dict):
-    """Precompute each comparable's release-day hours and its anchor.
+    """Precompute each comparable's release-day hours, anchor and tier.
 
     A comparable only counts when its release day has an hour-1 point;
     the GTA VI category's own pre-release series has none on its
@@ -146,18 +179,41 @@ def _comparable_curves(case: dict):
             continue
         pre = _pre_level(hourly, c.get("day_start") or "")
         curves.append((byhour, _anchor(byhour[1], pre),
-                       "PC" not in (c.get("platforms") or "")))
+                       "PC" not in (c.get("platforms") or ""), _tier(c)))
     return curves
 
 
-def _log_ratios(curves, hour: int, console_only: bool):
+def _weighted_median(pairs):
+    """Median of (value, weight) pairs, weighted by the second element."""
+    pairs = sorted(pairs)
+    total = sum(w for _, w in pairs)
+    acc = 0.0
+    for x, w in pairs:
+        acc += w
+        if acc >= total / 2.0:
+            return x
+    return pairs[-1][0]
+
+
+def _log_ratios(curves, hour: int, anchor: float, console_only: bool,
+                tier: str | None):
+    """Scale-weighted (log-ratio, weight) pairs for one hour.
+
+    tier narrows the pool ("comparable" keeps only that tier); None keeps
+    every tier. Weights are a Gaussian kernel on the log-anchor distance
+    to the target's anchor, so similarly-sized launches count most.
+    """
     out = []
-    for byhour, anch, is_console in curves:
+    log_anchor = math.log(anchor)
+    for byhour, anch, is_console, t in curves:
         if console_only and not is_console:
+            continue
+        if tier is not None and t != tier:
             continue
         if hour not in byhour or anch <= 0:
             continue
-        out.append(math.log(byhour[hour] / anch))
+        d = (math.log(anch) - log_anchor) / SCALE_BW
+        out.append((math.log(byhour[hour] / anch), math.exp(-0.5 * d * d)))
     return out
 
 
@@ -181,10 +237,14 @@ def forecast_case(case: dict, name: str) -> dict:
     curves = _comparable_curves(case)
     hours = []
     for h in range(2, 25):
-        lrs = _log_ratios(curves, h, console_only=True)
-        if len(lrs) < MIN_N:
-            lrs = _log_ratios(curves, h, console_only=False)
-        med = statistics.median(lrs) if lrs else 0.0
+        # Clean console-only pool first, then wider pools, each only when
+        # the previous one has too few ratios for this hour.
+        pairs = _log_ratios(curves, h, anch, console_only=True, tier="comparable")
+        if len(pairs) < MIN_N:
+            pairs = _log_ratios(curves, h, anch, console_only=True, tier=None)
+        if len(pairs) < MIN_N:
+            pairs = _log_ratios(curves, h, anch, console_only=False, tier="comparable")
+        med = _weighted_median(pairs) if pairs else 0.0
         sigma = SPREAD * math.sqrt(h - 1)
         med_v = anch * math.exp(med)
         qs = []
