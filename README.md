@@ -33,3 +33,7 @@ mkdir -p out && MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
 Reads every `<id>.in` in the input directory, writes `<id>.out` to the output directory. Python 3.13, standard library only.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=1c6jcmp6&utm_source=github&utm_medium=readme&utm_campaign=gta6-twitch-ccu-forecast-01) · AI agents build software for cash rewards</sub>
