@@ -1,44 +1,50 @@
-"""gta6-twitch-ccu-forecast-01 entry: scale-weighted console-launch ratio
-curve with a pre-midnight anchor (Python 3.13, standard library only).
+"""gta6-twitch-ccu-forecast-01 entry, v3: ensemble median + pre-midnight
+ramp correction + flat honest spread (Python 3.13, standard library only).
 
-Method (chosen from local tests on the 4 practice cases; see README):
+Method (chosen from local tests on the 4 practice cases, a leave-one-out
+run over the 38 kit comparables, and a simulated-final pool; see README-v3):
   - Anchor: the pre-midnight level only -- the geometric mean of the
     target's hourly viewers at 21:00/22:00/23:00 UTC the day before release.
-    Hour 1 of a rolling-midnight launch is a depressed anchor (pre-release
+    Hour 1 of a rolling-midnight launch is a depressed print (pre-release
     hype streams wind down at midnight while the US is still asleep), and
-    mixing it in only adds noise: on the practice cases the anchor weight
-    on hour 1 falls monotonically the smaller it gets (0.15 -> 0.183,
-    0.05 -> 0.177, 0.00 -> 0.175), so the hour-1 print is not used at all.
-    When the pre-midnight level is missing, the anchor falls back to the
-    hour-1 print alone.
-  - Curve: for each hour h = 2..24, take every past big launch in the
-    case's `comparables` that is console-only (its `platforms` has no PC --
-    the final game, GTA VI, is console-only, as are the practice launches)
-    and whose unlock note carries "Tier: comparable" (early-access-
-    contaminated launches are left out: their release-day shape is
-    distorted by early access), and compute log(viewers(h) / anchor) on
-    its release day. The forecast median for hour h is the target's anchor
-    times the SCALE-WEIGHTED MEDIAN of those log-ratios: each comparable
-    is weighted by a Gaussian kernel on the log-distance between its
-    anchor and the target's anchor (bandwidth 1.0), so launches of a
-    similar size shape the curve most. Launches of a similar scale have
-    similar launch-day shapes; a plain median lets small launches drag
-    the curve. Fallbacks keep the output valid when data is thin:
-    clean console-only -> console-only (any tier) -> all comparables
-    of tier comparable, each step taken only when the previous pool has
-    fewer than 6 ratios for that hour; still none -> persistence
-    (ratio 1).
-  - Quantiles are lognormal around that median with
-    sigma_h = 0.11 * sqrt(h - 1), using the standard normal quantiles at
-    0.05/0.25/0.5/0.75/0.95.
-
-Why this shape: the pre-midnight level carries most of the scale
-information; the scale-weighted console-only curve captures the day's
-shape (dip to ~0.7x in the small hours, US unlocks from hour 5, evening
-peak ~2x the anchor) for launches of the target's size. The parameters
-sit in a flat optimum (bandwidth 0.8-1.3, anchor weight 0-0.05, spread
-0.09-0.11 all score within ~0.002 of each other), so the model is not
-tuned to a sharp point of the practice set.
+    mixing it in only adds noise. When the pre-midnight level is missing,
+    the anchor falls back to the hour-1 print alone.
+  - Median curve: an ensemble of two scale-aware curves, averaged in log
+    space with weights 0.3 / 0.7:
+      (a) the v2 scale-weighted median: for each hour h, the median of
+          log(viewers(h) / anchor) over console-only, tier-"comparable"
+          comparables, each weighted by a Gaussian kernel on the
+          log-distance between its anchor and the target's anchor
+          (bandwidth 1.0), with the fallback chain clean -> console-only
+          (any tier) -> all comparables of tier "comparable", each step
+          taken only when the previous pool has fewer than 6 ratios;
+      (b) a per-hour log-log regression: log(viewers(h)) regressed on
+          log(anchor) over the console-only, tier-"comparable" pool
+          (ordinary least squares, one slope and intercept per hour),
+          evaluated at the target's anchor. Slopes run 0.68-0.98, i.e.
+          launch-day shape scales sublinearly with size: bigger launches
+          peak relatively lower. As insurance the regression median is
+          clamped to [0.25x, 4x] of the (a) median; the clamp never binds
+          on any tested case (max observed ratio 1.65x).
+    The two components disagree most where each is weakest -- (a) is noisy
+    hour to hour on a 7-curve pool, (b) extrapolates a line -- and their
+    average beats either alone on practice, on the simulated final, and
+    on leave-one-out over the big comparables.
+  - Pre-midnight ramp correction: g = log(viewers at 23:00 / viewers at
+    18:00 UTC the day before release) measures how fast the unlock wave
+    is already building at midnight. Across the big comparables, the
+    residual of the ensemble median correlates with g (r ~ +0.6 in the
+    first hours): a steep ramp means the early UTC hours stay higher than
+    the average curve. The median is multiplied by exp(b_h * dg), where
+    dg = g - (-0.099) (the pool's median g), clamped to [-1.0, +1.5],
+    with b_h = 0.35 for hours 2-5, 0.20 for hours 6-12, 0 afterwards.
+    When the 18:00/23:00 points are missing the correction is skipped.
+  - Quantiles are lognormal around the median with a CONSTANT sigma of
+    0.35 for every hour. The residual spread of the median is roughly
+    flat across hours (~0.2 on practice launches, ~0.5 on the diverse
+    big-launch pool), so the v2 spread 0.11*sqrt(h-1) is far too narrow
+    in the small hours and no better late; a flat 0.35 wins on practice,
+    on the simulated final, and on leave-one-out alike.
 
 Deliberately NOT done: the practice leaderboard is topped by entries
 that embed/memorize the practice answers with a ~0 spread (practice loss
@@ -47,12 +53,16 @@ the one real GTA VI case, where a memorized curve with a near-zero spread
 scores its full log error -- so no practice answers are embedded here
 and the spread stays honest.
 
-Local practice result (ground truth = SullyGnome "Average viewers" for
-the 4 practice release days, hour-1 values verified equal to the cases'
-`known` prints): mean pinball loss 0.156 vs house baseline 0.387,
-per case p00 0.198 / p01 0.147 / p02 0.128 / p03 0.151. The same
-method on a simulated final-size pool (the 4 practice launches added as
-comparables, 42 total) scores 0.161.
+Local results (ground truth = SullyGnome "Average viewers" for the 4
+practice release days, hour-1 values verified equal to the cases'
+`known` prints; pinball loss exactly as RULES.txt defines it):
+  practice mean 0.141 (p00 0.175 / p01 0.130 / p02 0.110 / p03 0.149)
+    vs v2 0.156 and house baseline 0.387.
+  simulated final (practice launches added as comparables, target left
+    out, 41 total): 0.142 vs v2 0.161.
+  leave-one-out over the 21 big comparables (anchor >= 50k): 0.260
+    vs v2 0.276; over the 7 console-only tier-"comparable" ones: 0.230
+    vs v2 0.326.
 
 How the grader runs it: `python3 -P -s /bot/main.py` in python:3.13-slim,
 standard library only, no network. It reads every <id>.in in the input
@@ -80,18 +90,21 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # The standard normal's quantile at each level.
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
-# Anchor = p1^A * pre^(1-A): weight on the hour-1 print, the rest on the
-# geometric mean of the pre-midnight hourly viewers (21/22/23 UTC).
-# A = 0: the anchor is the pre-midnight level alone (see the docstring).
-A = 0.0
-# Lognormal spread of an hour's forecast: sigma_h = SPREAD * sqrt(h - 1).
-SPREAD = 0.11
+# Lognormal spread of every hour's forecast (flat, see docstring).
+SIGMA = 0.35
 # Pre-midnight hours (UTC, day before release) feeding the anchor.
 PRE_HOURS = ("21", "22", "23")
 # Minimum log-ratios in a pool before falling back to a wider pool.
 MIN_N = 6
 # Gaussian kernel bandwidth (in log-anchor units) for the scale weights.
 SCALE_BW = 1.0
+# Ensemble weight on the scale-weighted-median component (rest: log-log).
+W_V2 = 0.3
+# Pre-midnight ramp correction: pool median g, clamp on dg, slopes by hour.
+G_MED = -0.099
+G_CLAMP = (-1.0, 1.5)
+# Insurance clamp on the log-log median relative to the v2 median.
+LOGLOG_CLAMP = (0.25, 4.0)
 
 
 def round2(x: float) -> float | int:
@@ -124,35 +137,52 @@ def _day_hours(points, day: str) -> dict:
     return out
 
 
+def _prev_day_hours(points, day_start: str) -> dict:
+    """Hourly viewers {clock hour: viewers} for the day before day_start."""
+    if not day_start:
+        return {}
+    prev_day = str(date.fromisoformat(day_start[:10]) - timedelta(days=1))
+    out = {}
+    for p in points or []:
+        f = p.get("from")
+        if not f or not f.startswith(prev_day):
+            continue
+        v = p.get("viewers")
+        if v is not None and v > 0:
+            out[int(f[11:13])] = float(v)
+    return out
+
+
 def _pre_level(points, day_start: str):
     """Geometric mean of viewers at 21/22/23 UTC the day before day_start.
 
     Returns None when the series has none of those hours (the anchor then
     falls back to the hour-1 print alone).
     """
-    if not day_start:
-        return None
-    prev_day = str(date.fromisoformat(day_start[:10]) - timedelta(days=1))
-    vals = []
-    for p in points or []:
-        f = p.get("from")
-        if not f or not f.startswith(prev_day):
-            continue
-        if f[11:13] not in PRE_HOURS:
-            continue
-        v = p.get("viewers")
-        if v is not None and v > 0:
-            vals.append(float(v))
+    prev = _prev_day_hours(points, day_start)
+    vals = [prev[int(h)] for h in PRE_HOURS if int(h) in prev]
     if not vals:
         return None
     return math.exp(sum(math.log(v) for v in vals) / len(vals))
 
 
+def _pre_growth(points, day_start: str):
+    """log(viewers 23:00 / viewers 18:00 UTC) the day before day_start.
+
+    Returns None when either hour is missing (the ramp correction is
+    then skipped).
+    """
+    prev = _prev_day_hours(points, day_start)
+    if 23 in prev and 18 in prev and prev[18] > 0:
+        return math.log(prev[23] / prev[18])
+    return None
+
+
 def _anchor(p1: float, pre) -> float:
-    """Weighted geometric mean of the hour-1 print and the pre-midnight level."""
+    """The anchor is the pre-midnight level alone (hour 1 adds noise)."""
     if pre is None or pre <= 0:
         return p1
-    return math.exp(A * math.log(p1) + (1.0 - A) * math.log(pre))
+    return pre
 
 
 def _tier(comp: dict) -> str:
@@ -217,6 +247,64 @@ def _log_ratios(curves, hour: int, anchor: float, console_only: bool,
     return out
 
 
+def _v2_median(curves, hour: int, anchor: float) -> float:
+    """Scale-weighted median log-ratio curve (the v2 component)."""
+    pairs = _log_ratios(curves, hour, anchor, console_only=True, tier="comparable")
+    if len(pairs) < MIN_N:
+        pairs = _log_ratios(curves, hour, anchor, console_only=True, tier=None)
+    if len(pairs) < MIN_N:
+        pairs = _log_ratios(curves, hour, anchor, console_only=False, tier="comparable")
+    med = _weighted_median(pairs) if pairs else 0.0
+    return anchor * math.exp(med)
+
+
+def _ols(xs, ys):
+    """Least-squares line y ~ a + b*x; returns (a, b)."""
+    n = len(xs)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return my, 0.0
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    return my - b * mx, b
+
+
+def _loglog_median(curves, hour: int, anchor: float, v2_med: float) -> float:
+    """Per-hour log-log regression median over the clean pool.
+
+    Falls back to the pooled median log-ratio when too few points, and
+    is clamped to [0.25x, 4x] of the v2 median as insurance against a
+    wild extrapolation at an anchor far outside the pool's range.
+    """
+    xs, ys = [], []
+    for byhour, anch, is_console, t in curves:
+        if not is_console or t != "comparable":
+            continue
+        if hour in byhour and anch > 0:
+            xs.append(math.log(anch))
+            ys.append(math.log(byhour[hour]))
+    if len(xs) >= 4:
+        a, b = _ols(xs, ys)
+        med = math.exp(a + b * math.log(anchor))
+    else:
+        rs = [math.log(byhour[hour] / anch) for byhour, anch, _, _
+              in curves if hour in byhour and anch > 0]
+        med = anchor * math.exp(statistics.median(rs)) if rs else anchor
+    lo = LOGLOG_CLAMP[0] * v2_med
+    hi = LOGLOG_CLAMP[1] * v2_med
+    return min(max(med, lo), hi)
+
+
+def _g_slope(hour: int) -> float:
+    """Ramp-correction slope for one hour (0 outside hours 2-12)."""
+    if hour <= 5:
+        return 0.35
+    if hour <= 12:
+        return 0.20
+    return 0.0
+
+
 def forecast_case(case: dict, name: str) -> dict:
     if case.get("levels") != LEVELS:
         raise ValueError(f"{name} asks for levels {case.get('levels')}, not {LEVELS}")
@@ -232,25 +320,28 @@ def forecast_case(case: dict, name: str) -> dict:
         hh = case.get("history_hourly") or []
         p1 = float(hh[-1]["viewers"]) if hh and hh[-1].get("viewers") else 1.0
     p1 = max(1.0, p1)
-    pre = _pre_level(case.get("history_hourly") or [], case.get("day_start") or "")
+    history = case.get("history_hourly") or []
+    pre = _pre_level(history, case.get("day_start") or "")
     anch = _anchor(p1, pre)
     curves = _comparable_curves(case)
+    # Pre-midnight ramp correction, shared across hours.
+    g = _pre_growth(history, case.get("day_start") or "")
+    dg = None
+    if g is not None:
+        dg = min(max(g - G_MED, G_CLAMP[0]), G_CLAMP[1])
     hours = []
     for h in range(2, 25):
-        # Clean console-only pool first, then wider pools, each only when
-        # the previous one has too few ratios for this hour.
-        pairs = _log_ratios(curves, h, anch, console_only=True, tier="comparable")
-        if len(pairs) < MIN_N:
-            pairs = _log_ratios(curves, h, anch, console_only=True, tier=None)
-        if len(pairs) < MIN_N:
-            pairs = _log_ratios(curves, h, anch, console_only=False, tier="comparable")
-        med = _weighted_median(pairs) if pairs else 0.0
-        sigma = SPREAD * math.sqrt(h - 1)
-        med_v = anch * math.exp(med)
+        v2_med = _v2_median(curves, h, anch)
+        ll_med = _loglog_median(curves, h, anch, v2_med)
+        med_v = math.exp(W_V2 * math.log(v2_med) + (1.0 - W_V2) * math.log(ll_med))
+        if dg is not None:
+            b = _g_slope(h)
+            if b:
+                med_v *= math.exp(b * dg)
         qs = []
         prev = 0.0
         for z in Z:
-            q = round2(med_v * math.exp(z * sigma))
+            q = round2(med_v * math.exp(z * SIGMA))
             q = min(max(q, 1.0), 1e9)
             if q < prev:
                 q = prev
